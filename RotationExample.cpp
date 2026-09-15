@@ -1,3 +1,6 @@
+/* Fluid Implicit Particles on Coadjoint Orbits
+ * Toy example implementation for Algorithm 1 using a simple rotation
+*/
 #include <iostream>
 #include <algorithm>
 #include <iomanip>
@@ -14,8 +17,6 @@ struct Particle
 };
 
 using State = std::vector<Particle>;
-
-// use a rotation as an example
 
 struct GridVelocity
 {
