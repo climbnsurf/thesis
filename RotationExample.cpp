@@ -285,7 +285,7 @@ int main()
     constexpr double dt = 0.1;
     constexpr int numberOfSteps = 100;
 
-    std::ofstream file("results.csv");
+    std::ofstream file("../results.csv");
     file << "x,y\n";
 
 
