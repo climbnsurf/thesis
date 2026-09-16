@@ -1,11 +1,12 @@
 /* Fluid Implicit Particles on Coadjoint Orbits
- * Toy example implementation for Algorithm 1 using a simple rotation
+ * Toy example implementation for Algorithm 1 and 2 using a simple rotation with drift
 */
 #include <iostream>
 #include <algorithm>
 #include <iomanip>
 #include <vector>
 #include <Eigen/Dense>
+#include <cmath>
 
 using Vec2 = Eigen::Vector2d;
 using Mat2 = Eigen::Matrix2d;
@@ -16,14 +17,27 @@ struct Particle
     Vec2 u; // impulse
 };
 
+
 using State = std::vector<Particle>;
 
+// Grid velocity for rotation with drift
 struct GridVelocity
 {
-    double omega = 0.0;
+    Vec2 value = Vec2::Zero();
+
+    double omega() const { return value(0);}
+    double drift() const { return value(1); }
 };
 
+struct StepResult
+{
+    State y;
+    GridVelocity f;
+};
+
+
 // Toy Example Grid Velocity
+/* old version with rotation only
 GridVelocity F(const State& state)
 {
     double meanX = 0.0;
@@ -37,21 +51,44 @@ GridVelocity F(const State& state)
 
     return {1.0 + 0.25* meanX };
 
+}*/
+
+GridVelocity F(const State& state)
+{
+    double meanX = 0.0;
+    double meanY = 0.0;
+
+    for (const auto& p : state)
+    {
+        meanX += p.pos.x();
+        meanY += p.pos.y();
+    }
+
+    meanX /= state.size();
+    meanY /= state.size();
+
+    GridVelocity f;
+
+    f.value << 1.0 + 0.25*meanX, 0.25 * meanY;
+
+    return f;
+
 }
 
 // velocity of rotation
 
-Vec2 velocity(const GridVelocity& v, const Vec2& pos)
+Vec2 velocity(const GridVelocity& f, const Vec2& pos)
 {
-    return Vec2(-v.omega * pos.y(), v.omega * pos.x());
+    return Vec2(-f.omega() * pos.y() + f.drift(),
+        f.omega() * pos.x());
 }
 
-Mat2 gradVelocity(const GridVelocity& v, const Vec2&)
+Mat2 gradVelocity(const GridVelocity& f, const Vec2&)
 {
     Mat2 gradV;
 
-    gradV << 0.0, -v.omega,
-        v.omega, 0.0;
+    gradV << 0.0, -f.omega(),
+        f.omega(), 0.0;
 
     return gradV;
 }
@@ -107,7 +144,7 @@ Particle rk4(const Particle& p, const GridVelocity& v, double dt)
     return result;
 }
 
-// Time Integration
+// Time Integration (Algortihm 1)
 
 State timeStep(
     const State& y_n,
@@ -131,11 +168,11 @@ State timeStep(
         GridVelocity f_next = F(y_next);
 
         GridVelocity f_star_new {
-            0.5 * (f_n.omega + f_next.omega) // averaged grid velocity (19b)
+            0.5 * (f_n.value + f_next.value) // averaged grid velocity (19b)
         };
 
         double err =
-            std::abs(f_star_new.omega - f_star.omega) / std::max(1e-12, std::abs(f_star.omega));
+            (f_star_new.value - f_star.value).norm() / std::max(1e-12, f_star.value.norm());
 
         f_star = f_star_new;
 
@@ -146,20 +183,134 @@ State timeStep(
     return y_next;
 }
 
+// orthogonal projection for energy correction (for 21c)
+Vec2 orthogonalProjection(const Vec2& delta, const Vec2& f_star)
+{
+    const double denom = f_star.squaredNorm();
+
+    if (denom < 1e-10) return delta;
+
+    return delta - (f_star*f_star.dot(delta) / denom);
+
+}
+
+// Energy based correction (Algortihm 2)
+
+StepResult EnergyCorrection(const State& y_n,
+    const GridVelocity& f_n,
+    double dt,
+    int maxIterations = 10,
+    double tolerance = 1e-9) {
+
+GridVelocity f_star = F(y_n);;
+
+State y_next(y_n.size());
+
+    GridVelocity f_next = f_n;
+    GridVelocity f_raw_prev = F(y_n);
+
+
+for (int i = 0; i < maxIterations; i++)
+{
+    // Advection
+    for (std::size_t j = 0; j < y_n.size(); j++)
+    {
+        y_next[j] = rk4(y_n[j], f_star, dt); //advect every particle (21a)
+    }
+
+    GridVelocity f_raw = F(y_next);
+
+    GridVelocity f_star_new {
+        0.5 * (f_n.value + f_raw.value) // averaged grid velocity (19b)
+    };
+
+    Vec2 delta = f_raw.value - f_n.value;
+
+    f_next.value = f_n.value + orthogonalProjection(delta, f_star_new.value); // correction (21c)
+
+    const double err = (f_raw.value - f_raw_prev.value).norm() / std::max(1e-12, f_next.value.norm());
+
+    if (err < tolerance)
+        break;
+
+    f_star = f_star_new;
+    f_raw_prev = f_raw;
+}
+
+    return {y_next, f_next};
+
+}
+
+void printState(const State& state)
+{
+    for (int i = 0; i < state.size(); ++i)
+    {
+        std::cout
+            << "pos = "
+            << state.at(i).pos.transpose()
+            << ", u ="
+            << state.at(i).u.transpose()
+            << "\n";
+    }
+}
+
+double energy(const GridVelocity& f)
+{
+    return 0.5 * f.value.squaredNorm();
+}
+
 int main()
 {
+
+    State initialState = {
+        {
+            Vec2(1.0, 0.0),
+            Vec2(1.0, 0.0)
+        },
+        {
+            Vec2(0.0, 1.0),
+            Vec2(0.0, 1.0)
+        },
+        {
+        Vec2(-0.5, 0.5),
+            Vec2(0.5, 0.5)
+            }
+    };
+
+    constexpr double dt = 0.1;
+    constexpr int numberOfSteps = 10;
+
+    // Algo 1 test
+    /*State stateAlg1 = initialState;
+
+    for (int step = 0; step < numberOfSteps; ++step) {
+        stateAlg1 = timeStep(
+            stateAlg1,
+            dt);
+
+        printState(stateAlg1);
+    }*/
+
+
+
+
+    /*
+    // RK 4 test
+
     // test particle
     Particle p{
         Vec2(1.0, 0.0),
         Vec2(1.0, 0.0)
     };
-    GridVelocity v{1.0};
+    GridVelocity v;
+    v.value << 1.0, 0.0;
+
     constexpr double dt = 0.1;
 
     Particle res = rk4(p, v, dt);
 
     // exact solution using rotation matrix
-    const double t = v.omega * dt;
+    const double t = v.omega() * dt;
 
     Mat2 R;
 
@@ -189,7 +340,9 @@ int main()
 
     std::cout << "u error:\n"
               << (res.u - exactU).norm()
-              << '\n';
+              << '\n';*/
+
+
 
     return 0;
 }
