@@ -6,7 +6,7 @@
 #include <iomanip>
 #include <vector>
 #include <Eigen/Dense>
-#include <cmath>
+#include <fstream>
 
 using Vec2 = Eigen::Vector2d;
 using Mat2 = Eigen::Matrix2d;
@@ -70,6 +70,10 @@ GridVelocity F(const State& state)
     GridVelocity f;
 
     f.value << 1.0 + 0.25*meanX, 0.25 * meanY;
+
+    /*GridVelocity f;
+
+    f.value << 1.0, 0.0; */
 
     return f;
 
@@ -241,6 +245,7 @@ for (int i = 0; i < maxIterations; i++)
 
 }
 
+/*
 void printState(const State& state)
 {
     for (int i = 0; i < state.size(); ++i)
@@ -252,7 +257,7 @@ void printState(const State& state)
             << state.at(i).u.transpose()
             << "\n";
     }
-}
+} */
 
 double energy(const GridVelocity& f)
 {
@@ -278,21 +283,49 @@ int main()
     };
 
     constexpr double dt = 0.1;
-    constexpr int numberOfSteps = 10;
+    constexpr int numberOfSteps = 100;
+
+    std::ofstream file("results.csv");
+    file << "x,y\n";
+
 
     // Algo 1 test
-    /*State stateAlg1 = initialState;
+    State stateAlg1 = initialState;
 
     for (int step = 0; step < numberOfSteps; ++step) {
         stateAlg1 = timeStep(
             stateAlg1,
             dt);
 
-        printState(stateAlg1);
-    }*/
+        file << stateAlg1[0].pos.x() << ", "
+        << stateAlg1[0].pos.y()
+        << "\n";
+    }
 
+    // Algo 2 test
+    State stateAlg2 = initialState;
 
+    GridVelocity fAlg2 = F(stateAlg2);
 
+    for (int step = 0; step < numberOfSteps; ++step)
+    {
+        const double initialEnergy = energy(fAlg2);
+
+        std::cout << initialEnergy << "\n";
+
+        StepResult result =
+            EnergyCorrection(stateAlg2,
+                fAlg2,
+                dt
+                );
+
+        stateAlg2 = result.y;
+        fAlg2 = result.f;
+
+        const double finalEnergy = energy(fAlg2);
+
+        std::cout << initialEnergy - finalEnergy << "\n";
+    }
 
     /*
     // RK 4 test
