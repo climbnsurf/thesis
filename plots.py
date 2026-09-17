@@ -7,5 +7,5 @@ ROOT_DIR = Path(__file__).parent
 df = pd.read_csv(ROOT_DIR / "results.csv")
 
 plt.gca().set_aspect('equal')
-plt.plot(df["x"], df["y"], marker="o")
+plt.plot(df["x"], df["y"])
 plt.savefig(ROOT_DIR / "plot.png")

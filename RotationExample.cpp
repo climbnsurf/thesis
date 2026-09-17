@@ -17,7 +17,6 @@ struct Particle
     Vec2 u; // impulse
 };
 
-
 using State = std::vector<Particle>;
 
 // Grid velocity for rotation with drift
@@ -29,51 +28,84 @@ struct GridVelocity
     double drift() const { return value(1); }
 };
 
+// setup for experiments
+enum class ModelType
+{
+    ConstantRotation,
+    RotationWithDrift,
+    StateDependent
+};
+
+enum class Algorithm
+{
+    TrapezIntegrator,
+    EnergyCorrection
+};
+
+struct ExperimentConfig
+{
+    std::string name;
+
+    ModelType model;
+    Algorithm algorithm;
+
+    double dt;
+    int steps;
+
+    int maxIterations;
+    double tolerance;
+
+    double omega;
+    double drift;
+};
+
 struct StepResult
 {
     State y;
     GridVelocity f;
 };
 
-
 // Toy Example Grid Velocity
-/* old version with rotation only
-GridVelocity F(const State& state)
+
+GridVelocity F(const State& state, const ExperimentConfig& config)
 {
-    double meanX = 0.0;
-
-    for (const auto& p : state)
-    {
-        meanX += p.pos.x();
-    }
-
-    meanX /= state.size();
-
-    return {1.0 + 0.25* meanX };
-
-}*/
-
-GridVelocity F(const State& state)
-{
-    double meanX = 0.0;
-    double meanY = 0.0;
-
-    for (const auto& p : state)
-    {
-        meanX += p.pos.x();
-        meanY += p.pos.y();
-    }
-
-    meanX /= state.size();
-    meanY /= state.size();
-
     GridVelocity f;
 
-    f.value << 1.0 + 0.25*meanX, 0.25 * meanY;
+    switch (config.model)
+    {
+    case ModelType::ConstantRotation:
+        {
+            f.value << config.omega, 0.0;
+            break;
+        }
 
-    /*GridVelocity f;
+    case ModelType::RotationWithDrift:
+        {
+            f.value << config.omega,
+                        config.drift;
+            break;
+        }
+    case ModelType::StateDependent:
+        {
+            double meanX = 0.0;
+            double meanY = 0.0;
 
-    f.value << 1.0, 0.0; */
+            for (const auto& p : state)
+            {
+                meanX += p.pos.x();
+                meanY += p.pos.y();
+            }
+
+            meanX /= state.size();
+            meanY /= state.size();
+
+            GridVelocity f;
+
+            f.value << 1.0 + 0.25*meanX, 0.25 * meanY;
+
+            break;
+        }
+    }
 
     return f;
 
@@ -152,24 +184,22 @@ Particle rk4(const Particle& p, const GridVelocity& v, double dt)
 
 State timeStep(
     const State& y_n,
-    double dt,
-    int maxIterations = 10,
-    double tolerance = 1e-9)
+    const ExperimentConfig& config)
 {
 
-    GridVelocity f_n = F(y_n);
+    GridVelocity f_n = F(y_n, config);
     GridVelocity f_star = f_n;
 
     State y_next(y_n.size());
 
-    for (int i = 0; i < maxIterations; i++)
+    for (int i = 0; i < config.maxIterations; i++)
     {
         for (std::size_t j = 0; j < y_n.size(); j++)
         {
-            y_next[j] = rk4(y_n[j], f_star, dt); //advect every particle
+            y_next[j] = rk4(y_n[j], f_star, config.dt); //advect every particle
         }
 
-        GridVelocity f_next = F(y_next);
+        GridVelocity f_next = F(y_next, config);
 
         GridVelocity f_star_new {
             0.5 * (f_n.value + f_next.value) // averaged grid velocity (19b)
@@ -180,7 +210,7 @@ State timeStep(
 
         f_star = f_star_new;
 
-        if (err < tolerance)
+        if (err < config.tolerance)
             break;
     }
 
@@ -201,28 +231,25 @@ Vec2 orthogonalProjection(const Vec2& delta, const Vec2& f_star)
 // Energy based correction (Algortihm 2)
 
 StepResult EnergyCorrection(const State& y_n,
-    const GridVelocity& f_n,
-    double dt,
-    int maxIterations = 10,
-    double tolerance = 1e-9) {
+    const GridVelocity& f_n, const ExperimentConfig& config) {
 
-GridVelocity f_star = F(y_n);;
+GridVelocity f_star = F(y_n, config);;
 
 State y_next(y_n.size());
 
     GridVelocity f_next = f_n;
-    GridVelocity f_raw_prev = F(y_n);
+    GridVelocity f_raw_prev = F(y_n, config);
 
 
-for (int i = 0; i < maxIterations; i++)
+for (int i = 0; i < config.maxIterations; i++)
 {
     // Advection
     for (std::size_t j = 0; j < y_n.size(); j++)
     {
-        y_next[j] = rk4(y_n[j], f_star, dt); //advect every particle (21a)
+        y_next[j] = rk4(y_n[j], f_star, config.dt); //advect every particle (21a)
     }
 
-    GridVelocity f_raw = F(y_next);
+    GridVelocity f_raw = F(y_next, config);
 
     GridVelocity f_star_new {
         0.5 * (f_n.value + f_raw.value) // averaged grid velocity (19b)
@@ -234,7 +261,7 @@ for (int i = 0; i < maxIterations; i++)
 
     const double err = (f_raw.value - f_raw_prev.value).norm() / std::max(1e-12, f_next.value.norm());
 
-    if (err < tolerance)
+    if (err < config.tolerance)
         break;
 
     f_star = f_star_new;
@@ -245,23 +272,47 @@ for (int i = 0; i < maxIterations; i++)
 
 }
 
-/*
-void printState(const State& state)
-{
-    for (int i = 0; i < state.size(); ++i)
-    {
-        std::cout
-            << "pos = "
-            << state.at(i).pos.transpose()
-            << ", u ="
-            << state.at(i).u.transpose()
-            << "\n";
-    }
-} */
-
 double energy(const GridVelocity& f)
 {
     return 0.5 * f.value.squaredNorm();
+}
+
+void runExperiment(const ExperimentConfig& config,
+    const State& initialState)
+{
+    State state = initialState;
+
+    std::ofstream ofile (
+        "../" + config.name + ".csv"
+        );
+
+    ofile <<
+        "step, time, particle, x, y,"
+        "omega, drift, energy\n";
+
+    for (int step = 0; step < config.steps; step++)
+    {
+        GridVelocity f = F(state,config);
+
+        for (std::size_t j = 0; j < state.size(); ++j)
+        {
+            ofile
+            << step << ", "
+            << step*config.dt << ", "
+            << j << ", "
+            << state.at(j).pos.x() << ", "
+            << state.at(j).pos.y() << ", "
+            << f.omega() << ", "
+            << f.drift() << ", "
+            << "\n";
+        }
+
+        if (step <= config.steps)
+        {
+            state = timeStep(state, config);
+        }
+
+    }
 }
 
 int main()
@@ -282,6 +333,37 @@ int main()
             }
     };
 
+    ExperimentConfig exp1 {
+        "01_constant_rotation",
+        ModelType::ConstantRotation,
+        Algorithm::TrapezIntegrator,
+        0.1,
+        100,
+        10,
+        1e-9,
+        1.0,
+        0.0
+    };
+
+    ExperimentConfig exp2 = exp1;
+    exp2.name = "02_rotation_with_drift_05";
+    exp2.model = ModelType::RotationWithDrift;
+    exp2.drift = 0.5;
+
+    ExperimentConfig exp3 = exp2;
+    exp2.name = "03_rotation_with_drift_3";
+    exp2.drift = 3;
+
+    ExperimentConfig exp4 = exp1;
+    exp2.name = "04_state_dependent";
+
+    runExperiment(exp1, initialState);
+    runExperiment(exp2, initialState);
+    runExperiment(exp3, initialState);
+    runExperiment(exp4, initialState);
+
+    /*
+
     constexpr double dt = 0.1;
     constexpr int numberOfSteps = 100;
 
@@ -291,8 +373,13 @@ int main()
 
     // Algo 1 test
     State stateAlg1 = initialState;
+    GridVelocity fAlg1 = F(stateAlg1);
+
 
     for (int step = 0; step < numberOfSteps; ++step) {
+
+        const double initialEnergy = energy(fAlg1);
+
         stateAlg1 = timeStep(
             stateAlg1,
             dt);
@@ -300,6 +387,11 @@ int main()
         file << stateAlg1[0].pos.x() << ", "
         << stateAlg1[0].pos.y()
         << "\n";
+
+        fAlg1 = F(stateAlg1, config );
+        const double finalEnergy = energy(fAlg1);
+
+        std::cout << initialEnergy - finalEnergy << "\n";
     }
 
     // Algo 2 test
@@ -310,8 +402,6 @@ int main()
     for (int step = 0; step < numberOfSteps; ++step)
     {
         const double initialEnergy = energy(fAlg2);
-
-        std::cout << initialEnergy << "\n";
 
         StepResult result =
             EnergyCorrection(stateAlg2,
