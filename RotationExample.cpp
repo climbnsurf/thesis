@@ -9,7 +9,9 @@
 #include <fstream>
 
 using Vec2 = Eigen::Vector2d;
+using VecXd = Eigen::VectorXd;
 using Mat2 = Eigen::Matrix2d;
+using MatXd = Eigen::MatrixXd;
 
 struct Particle
 {
@@ -20,7 +22,7 @@ struct Particle
 using State = std::vector<Particle>;
 
 // Grid velocity for rotation with drift
-struct GridVelocity
+struct VelocityField
 {
     Vec2 value = Vec2::Zero();
 
@@ -62,14 +64,14 @@ struct ExperimentConfig
 struct StepResult
 {
     State y;
-    GridVelocity f;
+    VelocityField f;
 };
 
 // Toy Example Grid Velocity
 
-GridVelocity F(const State& state, const ExperimentConfig& config)
+VelocityField F(const State& state, const ExperimentConfig& config)
 {
-    GridVelocity f;
+    VelocityField f;
 
     switch (config.model)
     {
@@ -99,7 +101,7 @@ GridVelocity F(const State& state, const ExperimentConfig& config)
             meanX /= state.size();
             meanY /= state.size();
 
-            GridVelocity f;
+            VelocityField f;
 
             f.value << 1.0 + 0.25*meanX, 0.25 * meanY;
 
@@ -112,14 +114,157 @@ GridVelocity F(const State& state, const ExperimentConfig& config)
 }
 
 // velocity of rotation
-
-Vec2 velocity(const GridVelocity& f, const Vec2& pos)
+/*
+Vec2 velocity(const VelocityField& f, const Vec2& pos)
 {
     return Vec2(-f.omega() * pos.y() + f.drift(),
         f.omega() * pos.x());
 }
 
-Mat2 gradVelocity(const GridVelocity& f, const Vec2&)
+*/
+
+// velocity of linear translation (non zero divergence)
+Vec2 velocity(const VelocityField& f, const Vec2& pos)
+{
+    return Vec2(2*pos.x(),
+        pos.y());
+}
+
+
+// 2d MACGrid
+// divergence is calculated using central differences implied by the grid
+// see Fluid Simulation for Computer Graphics 5.2
+struct MACGrid
+{
+
+    int nx;
+    int ny;
+    double h;
+
+    MatXd p;
+    MatXd v_x;
+    MatXd v_y;
+
+    MACGrid(int nx, int ny, double h): nx(nx), ny(ny), h(h), p(ny, nx),
+    v_x(ny, nx + 1),
+    v_y(ny + 1, nx)
+    {
+        p.setZero();
+        v_x.setZero();
+        v_y.setZero();
+    }
+
+    void setVelocity(const VelocityField& f)
+    {
+        // horizontal faces
+        for (int j = 0; j < nx; ++j)
+        {
+            for (int i = 0; i <= ny; ++i)
+            {
+                Vec2 pos((i+0.5) *h, j*h);
+                v_x(j, i) = velocity(f, pos).x();
+            }
+        }
+
+        // vertical faces
+        for (int j = 0; j <= ny; ++j)
+        {
+            for (int i = 0; i < nx; ++i)
+            {
+                Vec2 pos(i*h, (j+0.5)*h);
+                v_y(j, i) = velocity(f, pos).y();
+            }
+        }
+    }
+
+    double divergence(int i, int j) const
+    {
+        double dv_x_dx = (v_x(j, i + 1) - v_x(j, i)) / h;
+        double dv_y_dy = (v_y(j + 1, i) - v_y(j, i)) / h;
+
+        return dv_x_dx + dv_y_dy;
+    }
+
+};
+
+// logic for this thing is given by the formula for divergence above
+// so for the v_x part the non zero entries are 1/h (-1,1,...,0) for the first and then shifted for every row 1/h(0,-1,1,...,0)
+// and for the v_y part the non zero entries are separated by n_y-1 0's, so 1/h(-1,0,1,...,0) for n_y = 2
+MatXd divergenceMatrix(MACGrid& grid)
+{
+    const int nx = grid.nx;
+    const int ny = grid.ny;
+    const double& h = grid.h;
+    const int N = nx*ny;
+
+    MatXd D = MatXd::Zero(N, ny*(nx+1) + (ny+1)*nx);
+
+    for (int j = 0; j < ny; ++j)
+    {
+        for (int i = 0; i < nx; ++i)
+        {
+            int row = j * nx + i;
+
+            // v_x
+            D(row, j*(nx+1) + i) = -1.0 / h;
+            D(row, j*(nx+1) + (i + 1)) = 1.0 / h;
+
+
+            //v_y
+            D(row, ny * (nx + 1) + j*nx + i) = -1.0 / h;
+            D(row, ny * (nx + 1) + (j + 1) *nx + i) = 1.0 / h;
+        }
+    }
+
+    return D;
+}
+
+VecXd velocityVector(MACGrid& grid)
+{
+    const int nx = grid.nx;
+    const int ny = grid.ny;
+    MatXd v_x = grid.v_x;
+    MatXd v_y = grid.v_y;
+
+    VecXd f(ny * (nx + 1) + (ny + 1) * nx);
+
+    int k = 0;
+
+    // v_x values
+    for (int j = 0; j < ny; ++j)
+    {
+        for (int i = 0; i <= nx; ++i)
+        {
+            f(k++) = v_x(j, i);
+        }
+    }
+
+    // v_y values
+    for (int j = 0; j <= ny; ++j)
+    {
+        for (int i = 0; i < nx; ++i)
+        {
+            f(k++) = v_y(j, i);
+        }
+    }
+
+    return f;
+}
+
+// pressure projection (non galerkin)
+// uses inverse matrix -> not so good -> how not to use inverse?
+VecXd fProj(MatXd& D, VecXd& f)
+{
+
+    MatXd A = D * D.transpose();
+    MatXd Id = MatXd::Identity(f.size(), f.size());
+
+    MatXd P =  Id - D.transpose() * A.inverse() * D;
+    return P * f;
+
+}
+
+Mat2 gradVelocity(const VelocityField& f, const Vec2&)
 {
     Mat2 gradV;
 
@@ -138,7 +283,7 @@ struct Derivative
 // Advection, Equation (17)
 // du/dt = -(grad v(x))^T u(t)
 
-Derivative derivative(const Particle& p, const GridVelocity& f)
+Derivative derivative(const Particle& p, const VelocityField& f)
 {
     const Vec2 v = velocity(f, p.pos);
     const Mat2 gradV = gradVelocity(f, p.pos);
@@ -153,7 +298,7 @@ Derivative derivative(const Particle& p, const GridVelocity& f)
 
 // 4th order runge kutta
 
-Particle rk4(const Particle& p, const GridVelocity& v, double dt)
+Particle rk4(const Particle& p, const VelocityField& v, double dt)
 {
     Derivative k1 = derivative(p, v);
 
@@ -187,8 +332,8 @@ State timeStep(
     const ExperimentConfig& config)
 {
 
-    GridVelocity f_n = F(y_n, config);
-    GridVelocity f_star = f_n;
+    VelocityField f_n = F(y_n, config);
+    VelocityField f_star = f_n;
 
     State y_next(y_n.size());
 
@@ -199,9 +344,9 @@ State timeStep(
             y_next[j] = rk4(y_n[j], f_star, config.dt); //advect every particle
         }
 
-        GridVelocity f_next = F(y_next, config);
+        VelocityField f_next = F(y_next, config);
 
-        GridVelocity f_star_new {
+        VelocityField f_star_new {
             0.5 * (f_n.value + f_next.value) // averaged grid velocity (19b)
         };
 
@@ -231,14 +376,14 @@ Vec2 orthogonalProjection(const Vec2& delta, const Vec2& f_star)
 // Energy based correction (Algortihm 2)
 
 StepResult EnergyCorrection(const State& y_n,
-    const GridVelocity& f_n, const ExperimentConfig& config) {
+    const VelocityField& f_n, const ExperimentConfig& config) {
 
-GridVelocity f_star = F(y_n, config);;
+VelocityField f_star = F(y_n, config);;
 
 State y_next(y_n.size());
 
-    GridVelocity f_next = f_n;
-    GridVelocity f_raw_prev = F(y_n, config);
+    VelocityField f_next = f_n;
+    VelocityField f_raw_prev = F(y_n, config);
 
 
 for (int i = 0; i < config.maxIterations; i++)
@@ -249,9 +394,9 @@ for (int i = 0; i < config.maxIterations; i++)
         y_next[j] = rk4(y_n[j], f_star, config.dt); //advect every particle (21a)
     }
 
-    GridVelocity f_raw = F(y_next, config);
+    VelocityField f_raw = F(y_next, config);
 
-    GridVelocity f_star_new {
+    VelocityField f_star_new {
         0.5 * (f_n.value + f_raw.value) // averaged grid velocity (19b)
     };
 
@@ -272,7 +417,7 @@ for (int i = 0; i < config.maxIterations; i++)
 
 }
 
-double energy(const GridVelocity& f)
+double energy(const VelocityField& f)
 {
     return 0.5 * f.value.squaredNorm();
 }
@@ -283,7 +428,7 @@ void runExperiment(const ExperimentConfig& config,
     State state = initialState;
 
     std::ofstream ofile (
-        "../" + config.name + ".csv"
+        "../results/" + config.name + ".csv"
         );
 
     ofile <<
@@ -292,7 +437,7 @@ void runExperiment(const ExperimentConfig& config,
 
     for (int step = 0; step < config.steps; step++)
     {
-        GridVelocity f = F(state,config);
+        VelocityField f = F(state,config);
 
         for (std::size_t j = 0; j < state.size(); ++j)
         {
@@ -318,6 +463,34 @@ void runExperiment(const ExperimentConfig& config,
 int main()
 {
 
+    VelocityField f;
+    f.value << 1.0, 1.0;
+
+    MACGrid grid(2,2,1.0/2);
+    grid.setVelocity(f);
+
+    MatXd D = divergenceMatrix(grid);
+
+    std::cout << D << std::endl;
+
+    VecXd f_vec = velocityVector(grid);
+
+    //std::cout << D << std::endl;
+    //std::cout << f_vec << std::endl;
+
+
+    std::cout << fProj(D, f_vec) <<  std::endl;
+    std::cout << D*fProj(D, f_vec) <<  std::endl;
+
+
+    for (int j = 0; j < grid.ny; ++j)
+    {
+        for (int i = 0; i<grid.nx; ++i)
+        {
+           // std::cout << "div(" << i << ", " << j << ") = " << grid.divergence(i,j) << std::endl;
+        }
+    }
+/*
     State initialState = {
         {
             Vec2(1.0, 0.0),
@@ -351,18 +524,18 @@ int main()
     exp2.drift = 0.5;
 
     ExperimentConfig exp3 = exp2;
-    exp2.name = "03_rotation_with_drift_3";
-    exp2.drift = 3;
+    exp3.name = "03_rotation_with_drift_3";
+    exp3.drift = 3;
 
     ExperimentConfig exp4 = exp1;
-    exp2.name = "04_state_dependent";
+    exp4.name = "04_state_dependent";
 
     runExperiment(exp1, initialState);
     runExperiment(exp2, initialState);
     runExperiment(exp3, initialState);
     runExperiment(exp4, initialState);
 
-    /*
+
 
     constexpr double dt = 0.1;
     constexpr int numberOfSteps = 100;

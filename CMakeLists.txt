@@ -8,3 +8,6 @@ find_package (Eigen3 REQUIRED NO_MODULE)
 
 add_executable (RotationExample RotationExample.cpp)
 target_link_libraries (RotationExample Eigen3::Eigen)
+
+add_executable (GridVelocityExample GridVelocityExample.cpp)
+target_link_libraries (GridVelocityExample Eigen3::Eigen)
