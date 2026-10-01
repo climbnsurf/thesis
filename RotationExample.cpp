@@ -131,139 +131,6 @@ Vec2 velocity(const VelocityField& f, const Vec2& pos)
 }
 
 
-// 2d MACGrid
-// divergence is calculated using central differences implied by the grid
-// see Fluid Simulation for Computer Graphics 5.2
-struct MACGrid
-{
-
-    int nx;
-    int ny;
-    double h;
-
-    MatXd p;
-    MatXd v_x;
-    MatXd v_y;
-
-    MACGrid(int nx, int ny, double h): nx(nx), ny(ny), h(h), p(ny, nx),
-    v_x(ny, nx + 1),
-    v_y(ny + 1, nx)
-    {
-        p.setZero();
-        v_x.setZero();
-        v_y.setZero();
-    }
-
-    void setVelocity(const VelocityField& f)
-    {
-        // horizontal faces
-        for (int j = 0; j < nx; ++j)
-        {
-            for (int i = 0; i <= ny; ++i)
-            {
-                Vec2 pos((i+0.5) *h, j*h);
-                v_x(j, i) = velocity(f, pos).x();
-            }
-        }
-
-        // vertical faces
-        for (int j = 0; j <= ny; ++j)
-        {
-            for (int i = 0; i < nx; ++i)
-            {
-                Vec2 pos(i*h, (j+0.5)*h);
-                v_y(j, i) = velocity(f, pos).y();
-            }
-        }
-    }
-
-    double divergence(int i, int j) const
-    {
-        double dv_x_dx = (v_x(j, i + 1) - v_x(j, i)) / h;
-        double dv_y_dy = (v_y(j + 1, i) - v_y(j, i)) / h;
-
-        return dv_x_dx + dv_y_dy;
-    }
-
-};
-
-// logic for this thing is given by the formula for divergence above
-// so for the v_x part the non zero entries are 1/h (-1,1,...,0) for the first and then shifted for every row 1/h(0,-1,1,...,0)
-// and for the v_y part the non zero entries are separated by n_y-1 0's, so 1/h(-1,0,1,...,0) for n_y = 2
-MatXd divergenceMatrix(MACGrid& grid)
-{
-    const int nx = grid.nx;
-    const int ny = grid.ny;
-    const double& h = grid.h;
-    const int N = nx*ny;
-
-    MatXd D = MatXd::Zero(N, ny*(nx+1) + (ny+1)*nx);
-
-    for (int j = 0; j < ny; ++j)
-    {
-        for (int i = 0; i < nx; ++i)
-        {
-            int row = j * nx + i;
-
-            // v_x
-            D(row, j*(nx+1) + i) = -1.0 / h;
-            D(row, j*(nx+1) + (i + 1)) = 1.0 / h;
-
-
-            //v_y
-            D(row, ny * (nx + 1) + j*nx + i) = -1.0 / h;
-            D(row, ny * (nx + 1) + (j + 1) *nx + i) = 1.0 / h;
-        }
-    }
-
-    return D;
-}
-
-VecXd velocityVector(MACGrid& grid)
-{
-    const int nx = grid.nx;
-    const int ny = grid.ny;
-    MatXd v_x = grid.v_x;
-    MatXd v_y = grid.v_y;
-
-    VecXd f(ny * (nx + 1) + (ny + 1) * nx);
-
-    int k = 0;
-
-    // v_x values
-    for (int j = 0; j < ny; ++j)
-    {
-        for (int i = 0; i <= nx; ++i)
-        {
-            f(k++) = v_x(j, i);
-        }
-    }
-
-    // v_y values
-    for (int j = 0; j <= ny; ++j)
-    {
-        for (int i = 0; i < nx; ++i)
-        {
-            f(k++) = v_y(j, i);
-        }
-    }
-
-    return f;
-}
-
-// pressure projection (non galerkin)
-// uses inverse matrix -> not so good -> how not to use inverse?
-VecXd fProj(MatXd& D, VecXd& f)
-{
-
-    MatXd A = D * D.transpose();
-    MatXd Id = MatXd::Identity(f.size(), f.size());
-
-    MatXd P =  Id - D.transpose() * A.inverse() * D;
-    return P * f;
-
-}
-
 Mat2 gradVelocity(const VelocityField& f, const Vec2&)
 {
     Mat2 gradV;
@@ -466,31 +333,8 @@ int main()
     VelocityField f;
     f.value << 1.0, 1.0;
 
-    MACGrid grid(2,2,1.0/2);
-    grid.setVelocity(f);
-
-    MatXd D = divergenceMatrix(grid);
-
-    std::cout << D << std::endl;
-
-    VecXd f_vec = velocityVector(grid);
-
-    //std::cout << D << std::endl;
-    //std::cout << f_vec << std::endl;
 
 
-    std::cout << fProj(D, f_vec) <<  std::endl;
-    std::cout << D*fProj(D, f_vec) <<  std::endl;
-
-
-    for (int j = 0; j < grid.ny; ++j)
-    {
-        for (int i = 0; i<grid.nx; ++i)
-        {
-           // std::cout << "div(" << i << ", " << j << ") = " << grid.divergence(i,j) << std::endl;
-        }
-    }
-/*
     State initialState = {
         {
             Vec2(1.0, 0.0),
@@ -546,7 +390,7 @@ int main()
 
     // Algo 1 test
     State stateAlg1 = initialState;
-    GridVelocity fAlg1 = F(stateAlg1);
+    VelocityField fAlg1 = F(stateAlg1);
 
 
     for (int step = 0; step < numberOfSteps; ++step) {
@@ -570,7 +414,7 @@ int main()
     // Algo 2 test
     State stateAlg2 = initialState;
 
-    GridVelocity fAlg2 = F(stateAlg2);
+    VelocityField fAlg2 = F(stateAlg2);
 
     for (int step = 0; step < numberOfSteps; ++step)
     {
