@@ -12,3 +12,9 @@ target_link_libraries (RotationExample Eigen3::Eigen)
 
 add_executable (MACGridExample MACGridExample.cpp)
 target_link_libraries (MACGridExample Eigen3::Eigen)
+
+add_executable (LeastSquaresExample LeastSquaresExample.cpp)
+target_link_libraries (LeastSquaresExample Eigen3::Eigen)
+
+add_executable (BSplines BSplines.cpp)
+target_link_libraries (BSplines Eigen3::Eigen)

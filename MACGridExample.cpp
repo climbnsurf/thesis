@@ -1,12 +1,14 @@
 /* Fluid Implicit Particles on Coadjoint Orbits
  * Toy example implementation for Algorithm 1 and 2 using a simple rotation with drift
 */
+
 #include <iostream>
-#include <algorithm>
 #include <iomanip>
 #include <vector>
 #include <Eigen/Dense>
 #include <fstream>
+#include <eigen3/Eigen/src/Core/Matrix.h>
+#include <random>
 
 using Vec2 = Eigen::Vector2d;
 using VecXd = Eigen::VectorXd;
@@ -46,21 +48,21 @@ struct StepResult
 
 
 // velocity of rotation
-/*
+
 Vec2 velocity(const VelocityField& f, const Vec2& pos)
 {
     return Vec2(-f.omega() * pos.y() + f.drift(),
         f.omega() * pos.x());
 }
 
-*/
 
+/*
 // velocity of linear translation (non zero divergence)
 Vec2 velocity(const VelocityField& f, const Vec2& pos)
 {
     return Vec2(2*pos.x(),
         pos.y());
-}
+}*/
 
 
 // 2d MACGrid
@@ -92,7 +94,7 @@ struct MACGrid
         {
             for (int i = 0; i <= ny; ++i)
             {
-                Vec2 pos((i+0.5) *h, j*h);
+                Vec2 pos(i*h, (j+0.5)*h);
                 v_x(j, i) = velocity(f, pos).x();
             }
         }
@@ -102,7 +104,7 @@ struct MACGrid
         {
             for (int i = 0; i < nx; ++i)
             {
-                Vec2 pos(i*h, (j+0.5)*h);
+                Vec2 pos((i+0.5)*h, j*h);
                 v_y(j, i) = velocity(f, pos).y();
             }
         }
@@ -182,8 +184,33 @@ VecXd velocityVector(MACGrid& grid)
     return f;
 }
 
+
+void setVelocityVector(MACGrid& grid, const VecXd& f)
+{
+    int k = 0;
+
+    // v_x
+    for (int j = 0; j < grid.ny; ++j)
+    {
+        for (int i = 0; i <= grid.nx; ++i)
+        {
+            grid.v_x(j, i) = f(k++);
+        }
+    }
+
+    // v_y
+    for (int j = 0; j <= grid.ny; ++j)
+    {
+        for (int i = 0; i < grid.nx; ++i)
+        {
+            grid.v_y(j, i) = f(k++);
+        }
+    }
+}
+
 // pressure projection (non galerkin)
 // uses inverse matrix -> not so good -> how not to use inverse?
+// -> in the paper they use conjugate gradient
 VecXd fProj(MatXd& D, VecXd& f)
 {
 
@@ -195,6 +222,284 @@ VecXd fProj(MatXd& D, VecXd& f)
 
 }
 
+// BSpline interpolation
+
+double B20 (double x)
+{
+    return 0.5*pow((x-1),2);
+
+}
+double B21 (double x)
+{
+    return -(x*x) + x + 0.5;
+}
+
+double B22 (double x)
+{
+    return 0.5*(x*x);
+}
+
+double B30 (double x)
+{
+    return -(1.0/6.0)*pow((x-1), 3);
+}
+
+double B31 (double x)
+{
+    return 0.5*pow(x,3)  - (x*x) + (2.0/3.0) ;
+}
+
+double B32 (double x)
+{
+    return -0.5*pow(x,3) + (1.0/6.0) + 0.5*pow(x, 2) + 0.5*x;
+}
+
+double B33 (double x)
+{
+    return (1.0/6.0)*pow(x, 3);
+}
+
+Eigen::Vector3d B2(double x)
+{
+    return {B20(x), B21(x), B22(x)};
+}
+// Curry Schoenenberg  b spline for mimetic interpolation
+Eigen::Vector3d D2(double x, double h)
+{
+    return B2(x) / h;
+}
+
+Eigen::Vector4d B3(double x)
+{
+    return {
+        B30(x), B31(x), B32(x), B33(x)};
+}
+
+// stencil = grid points used for calculating the interpolated velocity
+// getStencil for non-mimetic interpolation using only B-splines
+Eigen::Matrix4d getStencil(const MatXd& grid, int i, int j)
+{
+      Eigen::Matrix4d stencil;
+
+        for (int k = 0; k < 4; ++k)
+        {
+            for (int l = 0; l < 4; ++l)
+            {
+                int ii = i + k -1;
+                int jj = j + l - 1;
+
+                stencil(l, k) = grid(jj, ii);
+            }
+        }
+
+    return stencil;
+}
+
+// getStencil functions for mimetic interpolation
+using Mat34 = Eigen::Matrix<double, 3, 4>;
+using Mat43 = Eigen::Matrix<double, 4, 3>;
+
+Mat34 getStencilVx(const MatXd& grid, int i, int j)
+{
+    Mat34 stencil;
+
+    for (int ky = 0; ky < 3; ++ky)
+    {
+        for (int kx = 0; kx < 4; ++kx)
+        {
+            int ii = i + kx - 1;
+            int jj = j + ky - 1;
+
+            stencil(ky, kx) = grid(jj, ii);
+        }
+    }
+
+    return stencil;
+}
+
+
+Mat43 getStencilVy(const MatXd& grid, int i, int j)
+{
+    Mat43 stencil;
+
+    for (int ky = 0; ky < 4; ++ky)
+    {
+        for (int kx = 0; kx < 3; ++kx)
+        {
+            int ii = i + kx - 1;
+            int jj = j + ky - 1;
+
+            stencil(ky, kx) = grid(jj, ii);
+        }
+    }
+
+    return stencil;
+}
+
+
+double interpolate2D (double x, double y, const Eigen::Matrix4d& u)
+{
+    auto bx = B3(x);
+    auto by = B3(y);
+
+    double res = 0.0;
+
+    for (int i = 0; i<4; ++i) {
+        for (int j = 0; j < 4; ++j)
+        {
+            res += u(j,i) * bx[i] * by[j];
+        }
+    }
+
+    return res;
+}
+
+double BSplineInterpolationVx (const MACGrid& grid, const Vec2& pos)
+{
+    double gx = pos.x() / grid.h;
+    double gy = pos.y() / grid.h - 0.5;
+
+    int i = static_cast<int>(gx);
+    int j = static_cast<int>(gy);
+
+    Eigen::Matrix4d stencil = getStencil(grid.v_x, i, j);
+
+    double tx = gx - i;
+    double ty = gy - j;
+
+    return interpolate2D(tx, ty, stencil);
+}
+
+double BSplineInterpolationVy (const MACGrid& grid, const Vec2& pos)
+{
+    double gx = pos.x() / grid.h - 0.5;
+    double gy = pos.y() / grid.h;
+
+    int i = static_cast<int>(gx);
+    int j = static_cast<int>(gy);
+
+    Eigen::Matrix4d stencil = getStencil(grid.v_y, i, j);
+
+    double tx = gx - i;
+    double ty = gy - j;
+
+    return interpolate2D(tx, ty, stencil);
+}
+
+Vec2 BSplineInterpolation(MACGrid& grid, Vec2& pos)
+{
+    return Vec2 {BSplineInterpolationVx(grid, pos),
+        BSplineInterpolationVy(grid, pos)};
+
+}
+
+
+// mimetic velocity interpolation
+
+double MSplineInterpolationVx(
+    const MACGrid& grid,
+    const Vec2& pos)
+{
+    double gx = pos.x() / grid.h;
+    double gy = pos.y() / grid.h;
+
+    int i = static_cast<int>(std::floor(gx));
+    int j = static_cast<int>(std::floor(gy));
+
+    double tx = gx - i;
+    double ty = gy - j;
+
+    Mat34 stencil =
+        getStencilVx(grid.v_x, i, j);
+
+    Eigen::Vector4d bx = B3(tx);
+    Eigen::Vector3d dy = D2(ty, grid.h);
+
+    double res = 0.0;
+
+    // 2d interpolation
+
+    for (int ky = 0; ky < 3; ++ky)
+    {
+        for (int kx = 0; kx < 4; ++kx)
+        {
+            double f = grid.h * stencil(ky, kx);
+
+            res +=  f * bx[kx] * dy[ky];
+        }
+    }
+
+    return res;
+}
+
+double MSplineInterpolationVy(
+    const MACGrid& grid,
+    const Vec2& pos)
+{
+    double gx = pos.x() / grid.h;
+    double gy = pos.y() / grid.h;
+
+    int i = static_cast<int>(std::floor(gx));
+    int j = static_cast<int>(std::floor(gy));
+
+    double tx = gx - i;
+    double ty = gy - j;
+
+    Mat43 stencil =
+        getStencilVy(grid.v_y, i, j);
+
+    Eigen::Vector3d dx = D2(tx, grid.h);
+    Eigen::Vector4d by = B3(ty);
+
+    double res = 0.0;
+
+    for (int ky = 0; ky < 4; ++ky)
+    {
+        for (int kx = 0; kx < 3; ++kx)
+        {
+            double f = grid.h * stencil(ky, kx);
+
+            res += f * dx[kx] * by[ky];
+        }
+    }
+
+    return res;
+}
+
+Vec2 MSplineInterpolation(const MACGrid& grid, const Vec2& pos)
+{
+    return Vec2 (MSplineInterpolationVx(grid, pos), MSplineInterpolationVy(grid, pos));
+}
+
+
+// random velocity field
+// asked chatgpt for this
+void setRandomVelocity(MACGrid& grid)
+{
+    std::mt19937 rng(42);
+    std::normal_distribution<double> dist(0.0, 1.0);
+
+    for (int j = 0; j < grid.ny; ++j)
+    {
+        for (int i = 0; i <= grid.nx; ++i)
+        {
+            grid.v_x(j, i) = dist(rng);
+        }
+    }
+
+    for (int j = 0; j <= grid.ny; ++j)
+    {
+        for (int i = 0; i < grid.nx; ++i)
+        {
+            grid.v_y(j, i) = dist(rng);
+        }
+    }
+}
+
+
+
+
+/*
 // bilinear interpolation
 double bilinInterpolation(double f00, double f01, double f10, double f11, double x, double y)
 {
@@ -296,7 +601,7 @@ Mat2 interpolateGradient(MACGrid& grid, Vec2& pos)
     return grad;
 }
 
-
+*/
 struct Derivative
 {
     Vec2 dx;
@@ -304,8 +609,8 @@ struct Derivative
 };
 
 // Advection, Equation (17)
-// du/dt = -(grad v(x))^T u(t)
 
+/*
 Derivative derivative(const Particle& p, const MACGrid& g)
 {
     const Vec2 v = interpolatedVelocity(g, p.pos);
@@ -318,6 +623,8 @@ Derivative derivative(const Particle& p, const MACGrid& g)
 
     return d;
 }
+
+
 
 // 4th order runge kutta
 
@@ -355,6 +662,8 @@ MACGrid F(const State& state)
     VecXd f_Proj = proj
 }
 */
+
+/*
 // Time Integration (Algortihm 1)
 
 State timeStep(
@@ -451,12 +760,12 @@ double energy(const VelocityField& f)
     return 0.5 * f.value.squaredNorm();
 }
 
-
+*/
 
 int main()
 {
 
-    VelocityField f;
+    /*VelocityField f;
     f.value << 1.0, 1.0;
 
     MACGrid grid(2,2,1.0/2);
@@ -632,6 +941,57 @@ int main()
               << '\n';
 
 
+*/
+
+
+    VelocityField f;
+    f.value << 1.0, 1.0;
+
+    MACGrid grid(16,16,1.0/16);
+    /*grid.setVelocity(f);
+
+    std::vector<Vec2> testPositions = {
+        Vec2(0.12, 0.12),
+        Vec2(0.50, 0.50),
+        Vec2(0.35, 0.65),
+        Vec2(0.89, 0.37)
+    };
+
+    for (Vec2 pos : testPositions)
+    {
+        Vec2 exact = velocity(f, pos);
+        Vec2 interpolated = BSplineInterpolation(grid, pos);
+
+        std::cout << exact.transpose() << std::endl;
+        std::cout << interpolated.transpose() << std::endl;
+
+    }
+
+    std::cout << "-------------------------------" << std::endl;
+
+    for (Vec2 pos : testPositions)
+    {
+        Vec2 exact = velocity(f, pos);
+        Vec2 interpolated = MSplineInterpolation(grid, pos);
+
+        std::cout << exact.transpose() << std::endl;
+        std::cout << interpolated.transpose() << std::endl;
+
+    }
+
+    */
+
+    setRandomVelocity(grid);
+    MatXd D = divergenceMatrix(grid);
+    VecXd raw = velocityVector(grid);
+
+    VecXd projected = fProj(D, raw);
+    setVelocityVector(grid,projected);
+
+    std::cout << (D*projected).norm() << std::endl;
+
 
     return 0;
+
+
 }
