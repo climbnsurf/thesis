@@ -9,6 +9,7 @@
 #include <fstream>
 #include <eigen3/Eigen/src/Core/Matrix.h>
 #include <random>
+#include <eigen3/Eigen/src/Cholesky/LDLT.h>
 
 using Vec2 = Eigen::Vector2d;
 using VecXd = Eigen::VectorXd;
@@ -276,7 +277,7 @@ Eigen::Vector4d B3(double x)
 }
 
 // stencil = grid points used for calculating the interpolated velocity
-// getStencil for non-mimetic interpolation using only B-splines
+
 Eigen::Matrix4d getStencil(const MatXd& grid, int i, int j)
 {
       Eigen::Matrix4d stencil;
@@ -364,7 +365,7 @@ double BSplineInterpolationVx (const MACGrid& grid, const Vec2& pos)
 
     Eigen::Matrix4d stencil = getStencil(grid.v_x, i, j);
 
-    double tx = gx - i;
+    double tx = gx - i; //local position in cell
     double ty = gy - j;
 
     return interpolate2D(tx, ty, stencil);
@@ -497,7 +498,265 @@ void setRandomVelocity(MACGrid& grid)
 }
 
 
+// Hodge star
+// calculated the integrals with chatgpt
+Eigen::Matrix4d massB3()
+{
+    Eigen::Matrix4d M;
 
+    M <<
+        20,  129,   60,    1,
+       129, 1188,  933,   60,
+        60,  933, 1188,  129,
+         1,   60,  129,   20;
+
+    return M / 5040.0;
+}
+
+Eigen::Matrix3d massB2()
+{
+    Eigen::Matrix3d M;
+
+    M <<
+         6, 13,  1,
+        13, 54, 13,
+         1, 13,  6;
+
+    return M / 120.0;
+}
+
+MatXd hodgeStar (const MACGrid& grid)
+{
+    const int nx = grid.nx;
+    const int ny = grid.ny;
+    const double h = grid.h;
+
+    const int Nx = ny * (nx + 1);
+    const int Ny = (ny + 1 ) * nx;
+
+    const int N = Nx + Ny;
+
+    MatXd star = MatXd::Zero(N, N);
+
+    const Eigen::Matrix4d M3 = massB3();
+    const Eigen::Matrix3d M2 = massB2();
+
+    for (int j = 0; j < ny; ++j)
+    {
+        for (int i = 0; i < nx; ++i)
+        {
+            // upper left block
+
+            for (int ky1 = 0; ky1 < 3; ++ky1)
+            {
+                for (int kx1 = 0; kx1 < 4; ++kx1)
+                {
+                    int ii = i + kx1 -1;
+                    int jj = j + ky1 -1;
+
+                    const int a = jj * (nx + 1) * ii;
+
+                    for (int ky2 = 0; ky2 < 3; ++ky2) {
+                        for (int kx2 = 0; kx2 < 4; ++kx2)
+                        {
+                            int iii = i + kx2 - 1;
+                            int jjj = j + ky2 - 1;
+
+                            const int b = jjj * (nx + 1) * iii;
+
+                            double value = h*h * M3(kx1, kx2) * M2(ky1, ky2);
+
+                            star(a, b) += value;
+                        }
+                    }
+                }
+
+                // under right block
+
+                for (int ky1 = 0; ky1 < 4; ++ky1)
+                {
+                    for (int kx1 = 0; kx1 < 3; ++kx1)
+                    {
+                        int ii = i + kx1 -1;
+                        int jj = j + ky1 -1;
+
+                        const int a = Nx + jj * nx * ii;
+
+                        for (int ky2 = 0; ky2 < 4; ++ky2) {
+                            for (int kx2 = 0; kx2 < 3; ++kx2)
+                            {
+                                int iii = i + kx2 - 1;
+                                int jjj = j + ky2 - 1;
+
+                                const int b = Nx +  jjj * (nx + 1) * iii;
+
+                                double value = h*h * M3(kx1, kx2) * M2(ky1, ky2);
+
+                                star(a, b) += value;
+                            }
+                        }
+                    }
+            }
+
+        }
+    }
+
+    return star;
+
+}
+
+// Galerkin pressure projection
+
+VecXd fProjGalerkin(const MatXd& D, const MatXd& star, const VecXd& f)
+    {
+
+        Eigen::LDLT<MatXd> starSolver(star);
+
+        // star inverse * D^T
+        MatXd X = starSolver.solve(D.transpose());
+
+        MatXd A = D*X;
+
+        Eigen::LDLT<MatXd> pressureSolver(A);
+
+        VecXd l = pressureSolver(D*f);
+
+        return f-X*l;
+
+    }
+
+// Galerkin energy function
+double energy(const MatXd& star, const VecXd& f)
+    {
+        return 0.5*f.transpose() * star * f;
+    }
+
+
+// P2G Weighted Linear Least Squares Problem
+
+struct Weight
+    {
+        int index;
+        double weight;
+    };
+
+std::vector<Weight> WeightsVx(const MACGrid& grid, const Vec2& pos)
+{
+    double gx = pos.x() / grid.h;
+    double gy = pos.y() / grid.h;
+
+    int i = static_cast<int>(std::floor(gx));
+    int j = static_cast<int>(std::floor(gy));
+
+    double tx = gx - i;
+    double ty = gy - j;
+
+    Eigen::Vector3d dx = D2(tx, grid.h);
+    Eigen::Vector4d by = B3(ty);
+
+    std::vector<Weight> weights;
+    weights.reserve(12);
+
+    for (int ky = 0; ky < 3; ++ky)
+    {
+        for (int kx = 0; kx < 4; ++kx)
+        {
+
+            int ii = i + kx - 1;
+            int jj = j + ky - 1;
+            const int globalIndex = jj* (grid.nx + 1) + ii;
+
+            double w = grid.h * bx[kx] * dy[ky];
+
+            weights.push_back({globalIndex, w});
+        }
+    }
+
+    return weights;
+
+}
+
+    std::vector<Weight> WeightsVy(const MACGrid& grid, const Vec2& pos)
+{
+    double gx = pos.x() / grid.h;
+    double gy = pos.y() / grid.h;
+
+    int i = static_cast<int>(std::floor(gx));
+    int j = static_cast<int>(std::floor(gy));
+
+    double tx = gx - i;
+    double ty = gy - j;
+
+    Eigen::Vector3d dx = D2(tx, grid.h);
+    Eigen::Vector4d by = B3(ty);
+
+    std::vector<Weight> weights;
+    weights.reserve(12);
+
+    for (int ky = 0; ky < 4; ++ky)
+    {
+        for (int kx = 0; kx < 3; ++kx)
+        {
+
+            int ii = i + kx - 1;
+            int jj = j + ky - 1;
+
+            const int globalIndex = grid.ny * (grid.nx + 1) * jj * grid.nx + ii;
+
+            double w = grid.h * bx[kx] * dy[ky];
+
+            weights.push_back({globalIndex, w});
+        }
+    }
+
+    return weights;
+
+}
+
+
+VecXd P2GLeastSquares(const State& particles, const MACGrid& grid, double mu)
+{
+    const int N = grid.ny *(grid.nx + 1) + (grid.ny + 1) * grid.nx;
+
+    MatXd A = MatXd::Zero(N, N);
+    VecXd b = VecXd::Zero(N);
+
+
+    for (const Particle& p : particles)
+    {
+
+        auto wx =  WeightsVx(grid, p.pos);
+
+        for (auto& a : wx)
+        {
+            b(a.index) += a.weight * p.u.x() * mu;
+
+            for (auto& c : wx)
+            {
+                A(a.index, c.index) += mu * a.weight * c.weight;
+            }
+        }
+
+
+        auto wy =  WeightsVy(grid, p.pos);
+
+        for (auto& a : wy)
+        {
+            b(a.index) += a.weight * p.u.y() * mu;
+
+            for (auto& c : wy)
+            {
+                A(a.index, c.index) += mu * a.weight * c.weight;
+            }
+        }
+    }
+}
+
+
+    return A.completeOrthogonalDecomposition().solve(b);
+
+
+}
 
 /*
 // bilinear interpolation
