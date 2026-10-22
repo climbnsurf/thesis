@@ -101,7 +101,6 @@ VelocityField F(const State& state, const ExperimentConfig& config)
             meanX /= state.size();
             meanY /= state.size();
 
-            VelocityField f;
 
             f.value << 1.0 + 0.25*meanX, 0.25 * meanY;
 
@@ -114,14 +113,14 @@ VelocityField F(const State& state, const ExperimentConfig& config)
 }
 
 // velocity of rotation
-/*
+
 Vec2 velocity(const VelocityField& f, const Vec2& pos)
 {
     return Vec2(-f.omega() * pos.y() + f.drift(),
         f.omega() * pos.x());
 }
 
-*/
+/*
 
 // velocity of linear translation (non zero divergence)
 Vec2 velocity(const VelocityField& f, const Vec2& pos)
@@ -129,7 +128,7 @@ Vec2 velocity(const VelocityField& f, const Vec2& pos)
     return Vec2(2*pos.x(),
         pos.y());
 }
-
+*/
 
 Mat2 gradVelocity(const VelocityField& f, const Vec2&)
 {
@@ -327,6 +326,72 @@ void runExperiment(const ExperimentConfig& config,
     }
 }
 
+void compareEnergy(
+    const ExperimentConfig& config,
+    const State& initialState)
+{
+    State stateAlg1 = initialState;
+    State stateAlg2 = initialState;
+
+    VelocityField fAlg1 = F(stateAlg1, config);
+    VelocityField fAlg2 = F(stateAlg2, config);
+
+    const double E0 = energy(fAlg1);
+
+    std::ofstream file("energy_comparison.csv");
+
+    file << "step,time,"
+            "energy_alg1,energy_alg2,"
+            "diff";
+
+    for (int step = 0; step <= config.steps; ++step)
+    {
+        const double E1 = energy(fAlg1);
+        const double E2 = energy(fAlg2);
+
+        const double diff = E1 - E0;
+
+
+        file
+            << step << ","
+            << step * config.dt << ","
+            << E1 << ","
+            << E2 << ","
+            << diff << "\n";
+
+        if (step == config.steps)
+            break;
+
+        // -------------------------
+        // Algorithm 1
+        // -------------------------
+
+        stateAlg1 = timeStep(
+            stateAlg1,
+            config
+        );
+
+        fAlg1 = F(
+            stateAlg1,
+            config
+        );
+
+
+        // -------------------------
+        // Algorithm 2
+        // -------------------------
+
+        StepResult result = EnergyCorrection(
+            stateAlg2,
+            fAlg2,
+            config
+        );
+
+        stateAlg2 = result.y;
+        fAlg2 = result.f;
+    }
+}
+
 int main()
 {
 
@@ -350,6 +415,7 @@ int main()
             }
     };
 
+        /*
     ExperimentConfig exp1 {
         "01_constant_rotation",
         ModelType::ConstantRotation,
@@ -378,61 +444,84 @@ int main()
     runExperiment(exp2, initialState);
     runExperiment(exp3, initialState);
     runExperiment(exp4, initialState);
+*/
 
 
 
-    constexpr double dt = 0.1;
-    constexpr int numberOfSteps = 100;
 
-    std::ofstream file("../results.csv");
-    file << "x,y\n";
+    ExperimentConfig energyExperiment {
+        "energy_comparison",
+        ModelType::StateDependent,
+        Algorithm::TrapezIntegrator,
+        0.1,
+        100,
+        20,
+        1e-10,
+        1.0,
+        0.0
+    };
 
+    compareEnergy(
+        energyExperiment,
+        initialState
+    );
 
-    // Algo 1 test
-    State stateAlg1 = initialState;
-    VelocityField fAlg1 = F(stateAlg1);
-
-
-    for (int step = 0; step < numberOfSteps; ++step) {
-
+    /*
+    for (int step = 0; step < numberOfSteps; ++step)
+    {
         const double initialEnergy = energy(fAlg1);
 
         stateAlg1 = timeStep(
             stateAlg1,
-            dt);
+            exp1
+        );
 
         file << stateAlg1[0].pos.x() << ", "
-        << stateAlg1[0].pos.y()
-        << "\n";
+             << stateAlg1[0].pos.y()
+             << "\n";
 
-        fAlg1 = F(stateAlg1, config );
+        fAlg1 = F(stateAlg1, exp1);
+
         const double finalEnergy = energy(fAlg1);
 
-        std::cout << initialEnergy - finalEnergy << "\n";
+        std::cout
+            << "Alg1 step " << step
+            << ": dE = "
+            << initialEnergy - finalEnergy
+            << "\n";
     }
 
+
+    // -----------------------------------------------------
     // Algo 2 test
+    // -----------------------------------------------------
+
     State stateAlg2 = initialState;
 
-    VelocityField fAlg2 = F(stateAlg2);
+    VelocityField fAlg2 = F(stateAlg2, exp3);
 
     for (int step = 0; step < numberOfSteps; ++step)
     {
         const double initialEnergy = energy(fAlg2);
 
         StepResult result =
-            EnergyCorrection(stateAlg2,
+            EnergyCorrection(
+                stateAlg2,
                 fAlg2,
-                dt
-                );
+                exp1
+            );
 
         stateAlg2 = result.y;
         fAlg2 = result.f;
 
         const double finalEnergy = energy(fAlg2);
 
-        std::cout << initialEnergy - finalEnergy << "\n";
-    }
+        std::cout
+            << "Alg2 step " << step
+            << ": dE = "
+            << initialEnergy - finalEnergy
+            << "\n";
+    } */
 
     /*
     // RK 4 test

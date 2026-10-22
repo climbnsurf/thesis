@@ -277,7 +277,7 @@ Eigen::Vector4d B3(double x)
 }
 
 // stencil = grid points used for calculating the interpolated velocity
-
+// -> stencil for non-mimetic b-spline-tensor product
 Eigen::Matrix4d getStencil(const MatXd& grid, int i, int j)
 {
       Eigen::Matrix4d stencil;
@@ -391,7 +391,6 @@ Vec2 BSplineInterpolation(MACGrid& grid, Vec2& pos)
 {
     return Vec2 {BSplineInterpolationVx(grid, pos),
         BSplineInterpolationVy(grid, pos)};
-
 }
 
 
